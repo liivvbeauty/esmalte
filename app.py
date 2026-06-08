@@ -22,7 +22,7 @@ SHEET_URL = st.secrets.get("GOOGLE_SHEET_CSV_URL", DEFAULT_CSV_URL)
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Montserrat:wght@300;400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800&display=swap');
 
     .stApp { background-color: #F7F2F4; }
     .block-container { padding-top: 1.5rem; max-width: 1080px; }
@@ -37,12 +37,13 @@ st.markdown(
     }
 
     .liivv-logo {
-        font-family: 'Playfair Display', serif;
-        font-size: 4.4rem;
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 4.8rem;
         color: #EBA6A6;
         margin: 0;
-        letter-spacing: 3px;
+        letter-spacing: 2px;
         line-height: 0.9;
+        font-weight: 700;
     }
 
     .liivv-subtitle {
@@ -182,6 +183,9 @@ st.markdown(
 )
 
 
+# =========================
+# HELPERS
+# =========================
 def normalize_text(value: str) -> str:
     value = str(value or "").strip().lower()
     value = unicodedata.normalize("NFD", value)
@@ -344,6 +348,9 @@ def render_result_card(row, rank):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+# =========================
+# HEADER
+# =========================
 st.markdown(
     """
     <div class="liivv-header">
@@ -354,6 +361,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# =========================
+# INTRO
+# =========================
 st.markdown(
     """
     <div class="intro-card">
@@ -364,10 +375,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# =========================
+# LOAD DATA
+# =========================
 try:
     df = load_data(SHEET_URL)
 except Exception as exc:
-    st.error("Não foi possível carregar a base de esmaltes. Confira se a aba está publicada como CSV ou se o secret GOOGLE_SHEET_CSV_URL está correto.")
+    st.error(
+        "Não foi possível carregar a base de esmaltes. "
+        "Confira se a aba está publicada como CSV ou se o secret GOOGLE_SHEET_CSV_URL está correto."
+    )
     st.caption(str(exc))
     st.stop()
 
@@ -375,7 +393,14 @@ if df.empty:
     st.warning("A base de esmaltes está vazia ou sem itens ativos para o app.")
     st.stop()
 
-st.markdown('<div class="filter-card"><div class="section-title">Escolha suas preferências</div>', unsafe_allow_html=True)
+
+# =========================
+# FILTERS
+# =========================
+st.markdown(
+    '<div class="filter-card"><div class="section-title">Escolha suas preferências</div>',
+    unsafe_allow_html=True,
+)
 
 c1, c2, c3, c4 = st.columns(4)
 
@@ -395,6 +420,10 @@ buscar = st.button("Ver minhas 3 sugestões")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
+
+# =========================
+# RESULTS
+# =========================
 if buscar:
     base = df.copy()
 
@@ -419,7 +448,10 @@ if buscar:
             unsafe_allow_html=True,
         )
     else:
-        st.markdown('<div class="section-title">Suas 3 sugestões LIIVV</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-title">Suas 3 sugestões LIIVV</div>',
+            unsafe_allow_html=True,
+        )
 
         for i, (_, row) in enumerate(resultado.iterrows(), start=1):
             render_result_card(row, i)
@@ -427,7 +459,10 @@ if buscar:
 else:
     sugestoes = df.sort_values("Score Final Recomendação", ascending=False).head(3)
 
-    st.markdown('<div class="section-title">Sugestões em destaque</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">Sugestões em destaque</div>',
+        unsafe_allow_html=True,
+    )
 
     for i, (_, row) in enumerate(sugestoes.iterrows(), start=1):
         render_result_card(row, i)
