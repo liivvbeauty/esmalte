@@ -37,13 +37,13 @@ st.markdown(
     }
 
     .liivv-logo {
-        font-family: Georgia, 'Times New Roman', serif;
-        font-size: 4.8rem;
-        color: #EBA6A6;
-        margin: 0;
-        letter-spacing: 2px;
-        line-height: 0.9;
-        font-weight: 700;
+        font-family: 'Montserrat', Arial, sans-serif;
+    font-size: 4.6rem;
+    color: #EBA6A6;
+    margin: 0;
+    letter-spacing: 12px;
+    line-height: 0.95;
+    font-weight: 300;
     }
 
     .liivv-subtitle {
