@@ -113,6 +113,7 @@ st.markdown(
         font-family: 'Montserrat', sans-serif;
         font-weight: 800;
         margin-right: 10px;
+        flex-shrink: 0;
     }
     .result-product {
         font-family: 'Montserrat', sans-serif;
@@ -169,20 +170,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# ─── Utilidades ──────────────────────────────────────────────────────────────
+
 def normalize_text(value: str) -> str:
     value = str(value or "").strip().lower()
     value = unicodedata.normalize("NFD", value)
     return "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
 
+
 def split_values(value: str) -> list[str]:
     return [p.strip() for p in re.split(r"[;|,]", str(value or "")) if p.strip()]
 
+
 def contains_choice(cell_value: str, choice: str) -> bool:
+    """Retorna True se 'choice' está entre os valores da célula."""
     if not choice or choice in {"Todas", "Todos", "Qualquer"}:
         return True
     normalized_choice = normalize_text(choice)
     normalized_values = [normalize_text(v) for v in split_values(cell_value)]
     return normalized_choice in normalized_values or normalized_choice in normalize_text(cell_value)
+
 
 def safe_get(row, column: str, default=""):
     if column not in row.index:
@@ -190,10 +198,11 @@ def safe_get(row, column: str, default=""):
     value = row[column]
     return value if pd.notna(value) else default
 
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [
-        str(column).replace("\ufeff", "").replace("\xa0", " ").strip()
-        for column in df.columns
+        str(col).replace("\ufeff", "").replace("\xa0", " ").strip()
+        for col in df.columns
     ]
     aliases = {
         "produto": "Produto",
@@ -217,47 +226,37 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "ativo app": "Ativo App",
     }
     rename_map = {}
-    for column in df.columns:
-        normalized = normalize_text(column)
+    for col in df.columns:
+        normalized = normalize_text(col)
         if normalized in aliases:
-            rename_map[column] = aliases[normalized]
+            rename_map[col] = aliases[normalized]
     return df.rename(columns=rename_map)
 
+
 def validate_columns(df: pd.DataFrame) -> None:
-    required_columns = [
-        "Produto",
-        "Fabricante",
-        "Filtro Cor",
-        "Filtro Estilo",
-        "Filtro Ocasião",
-        "Filtro Sensação",
-        "Score Final Recomendação",
-        "Ativo App",
+    required = [
+        "Produto", "Fabricante",
+        "Filtro Cor", "Filtro Estilo", "Filtro Ocasião", "Filtro Sensação",
+        "Score Final Recomendação", "Ativo App",
     ]
-    missing = [col for col in required_columns if col not in df.columns]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
-            "A base recebida não contém todas as colunas necessárias. "
             f"Colunas ausentes: {missing}. "
             f"Colunas recebidas: {df.columns.tolist()}"
         )
 
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_data(url: str) -> pd.DataFrame:
     response = requests.get(
-        url,
-        timeout=30,
-        allow_redirects=True,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "text/csv,text/plain,*/*",
-        },
+        url, timeout=30, allow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "text/csv,text/plain,*/*"},
     )
     response.raise_for_status()
 
     content_type = response.headers.get("Content-Type", "").lower()
     response_start = response.text.lstrip()[:500].lower()
-
     if (
         "text/html" in content_type
         or response_start.startswith("<!doctype html")
@@ -279,60 +278,86 @@ def load_data(url: str) -> pd.DataFrame:
         df["Ativo App"].astype(str).str.strip().str.casefold().eq("sim")
     ].copy()
 
-    numeric_columns = [
-        "Score Final Recomendação",
-        "Score Cor",
-        "Score Estilo",
-        "Score Ocasião",
-        "Score Sensação",
+    numeric_cols = [
+        "Score Final Recomendação", "Score Cor", "Score Estilo",
+        "Score Ocasião", "Score Sensação",
     ]
-    for column in numeric_columns:
-        if column in df.columns:
-            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df.fillna("")
 
+
 def unique_options(df: pd.DataFrame, column: str, default_label: str) -> list[str]:
+    """Retorna lista de opções únicas e ordenadas de uma coluna de filtro."""
+    EXCLUIR = {"tratamento", "indefinida", "indefinido", ""}
     values = []
     if column in df.columns:
         for item in df[column].tolist():
             values.extend(split_values(item))
-    clean_values = sorted(
-        {
-            value
-            for value in values
-            if value and normalize_text(value) not in {"tratamento", "indefinida"}
-        }
-    )
-    return [default_label] + clean_values
+    clean = sorted({
+        v for v in values
+        if normalize_text(v) not in EXCLUIR
+    })
+    return [default_label] + clean
 
-def calculate_app_score(row, cor, estilo, ocasiao, sensacao) -> float:
+
+# ─── Lógica de pontuação e filtragem ─────────────────────────────────────────
+
+def match_filters(row, sensacao, cor, estilo, ocasiao) -> bool:
+    """
+    Retorna False se o produto NÃO atende a algum filtro obrigatório selecionado.
+    Um filtro no valor padrão ("Todas"/"Todos") é ignorado.
+    """
+    checks = [
+        (sensacao, "Filtro Sensação"),
+        (cor,      "Filtro Cor"),
+        (estilo,   "Filtro Estilo"),
+        (ocasiao,  "Filtro Ocasião"),
+    ]
+    for choice, col in checks:
+        if choice in {"Todas", "Todos", "Qualquer"}:
+            continue
+        if not contains_choice(safe_get(row, col), choice):
+            return False
+    return True
+
+
+def calculate_app_score(row, sensacao, cor, estilo, ocasiao) -> float:
+    """
+    Calcula pontuação ponderada.
+    Sensação tem o maior peso (30), depois Cor (25), Estilo (25) e Ocasião (20).
+    O Score Final da planilha contribui com 30% extra como desempate.
+    """
     score = 0.0
-    selected_filters = 0
+    active = 0  # quantos filtros foram realmente selecionados
 
-    if cor != "Todas":
-        selected_filters += 1
-        score += 35 if contains_choice(safe_get(row, "Filtro Cor"), cor) else 8
+    weights = [
+        (sensacao, "Filtro Sensação", 30),
+        (cor,      "Filtro Cor",      25),
+        (estilo,   "Filtro Estilo",   25),
+        (ocasiao,  "Filtro Ocasião",  20),
+    ]
 
-    if estilo != "Todos":
-        selected_filters += 1
-        score += 25 if contains_choice(safe_get(row, "Filtro Estilo"), estilo) else 6
+    for choice, col, w in weights:
+        if choice not in {"Todas", "Todos", "Qualquer"}:
+            active += 1
+            if contains_choice(safe_get(row, col), choice):
+                score += w
 
-    if ocasiao != "Todas":
-        selected_filters += 1
-        score += 20 if contains_choice(safe_get(row, "Filtro Ocasião"), ocasiao) else 4
+    base = float(safe_get(row, "Score Final Recomendação", 0) or 0)
 
-    if sensacao != "Todas":
-        selected_filters += 1
-        score += 20 if contains_choice(safe_get(row, "Filtro Sensação"), sensacao) else 4
+    if active == 0:
+        # nenhum filtro selecionado → usa só o score da planilha
+        return round(base, 2)
 
-    base_score = float(safe_get(row, "Score Final Recomendação", 0) or 0)
-    score += base_score * 0.30
-
-    if selected_filters == 0:
-        score = base_score
-
+    # desempate proporcional pelo score da planilha (max 30 pontos extras)
+    score += base * 0.30
     return round(score, 2)
+
+
+# ─── Renderização ─────────────────────────────────────────────────────────────
 
 def escape_html(value) -> str:
     return (
@@ -344,23 +369,20 @@ def escape_html(value) -> str:
         .replace("'", "&#39;")
     )
 
-def render_result_card(row, rank: int) -> None:
-    produto = escape_html(safe_get(row, "Produto"))
-    fabricante = escape_html(safe_get(row, "Fabricante"))
-    titulo = escape_html(
-        safe_get(row, "Título Recomendação", "Recomendação LIIVV")
-        or "Recomendação LIIVV"
-    )
-    descricao = escape_html(safe_get(row, "Descrição Curta"))
-    porque = escape_html(safe_get(row, "Por que combina"))
-    tecnica = escape_html(safe_get(row, "Justificativa Técnica Simples"))
-    dica = escape_html(safe_get(row, "Dica de Uso"))
-    combina = escape_html(safe_get(row, "Combina com"))
-    evitar = escape_html(safe_get(row, "Evitar quando"))
 
-    st.markdown('<div class="result-card">', unsafe_allow_html=True)
-    st.markdown(
-        f'''
+def render_result_card(row, rank: int) -> None:
+    produto    = escape_html(safe_get(row, "Produto"))
+    fabricante = escape_html(safe_get(row, "Fabricante"))
+    titulo     = escape_html(safe_get(row, "Título Recomendação", "Recomendação LIIVV") or "Recomendação LIIVV")
+    descricao  = escape_html(safe_get(row, "Descrição Curta"))
+    porque     = escape_html(safe_get(row, "Por que combina"))
+    tecnica    = escape_html(safe_get(row, "Justificativa Técnica Simples"))
+    dica       = escape_html(safe_get(row, "Dica de Uso"))
+    combina    = escape_html(safe_get(row, "Combina com"))
+    evitar     = escape_html(safe_get(row, "Evitar quando"))
+
+    html = f'''
+    <div class="result-card">
         <div style="display:flex; align-items:center;">
             <div class="result-rank">{rank}</div>
             <div>
@@ -370,39 +392,26 @@ def render_result_card(row, rank: int) -> None:
         </div>
         <div class="recommend-title">{titulo}</div>
         <div class="recommend-text">{descricao}</div>
-        ''',
-        unsafe_allow_html=True,
-    )
+    '''
 
     if porque:
-        st.markdown(
-            f"<div class='recommend-text'><span class='mini-label'>Por que recomendamos:</span> {porque}</div>",
-            unsafe_allow_html=True,
-        )
+        html += f"<div class='recommend-text'><span class='mini-label'>Por que recomendamos:</span> {porque}</div>"
     if tecnica:
-        st.markdown(
-            f"<div class='technical-box'><span class='mini-label'>Base técnica simples:</span> {tecnica}</div>",
-            unsafe_allow_html=True,
-        )
+        html += f"<div class='technical-box'><span class='mini-label'>Base técnica simples:</span> {tecnica}</div>"
     if dica:
-        st.markdown(
-            f"<div class='recommend-text'><span class='mini-label'>Dica de uso:</span> {dica}</div>",
-            unsafe_allow_html=True,
-        )
+        html += f"<div class='recommend-text'><span class='mini-label'>Dica de uso:</span> {dica}</div>"
     if combina or evitar:
-        st.markdown("<hr>", unsafe_allow_html=True)
+        html += "<hr>"
     if combina:
-        st.markdown(
-            f"<div class='small-text'><span class='mini-label'>Combina com:</span> {combina}</div>",
-            unsafe_allow_html=True,
-        )
+        html += f"<div class='small-text'><span class='mini-label'>Combina com:</span> {combina}</div>"
     if evitar:
-        st.markdown(
-            f"<div class='small-text'><span class='mini-label'>Evitar quando:</span> {evitar}</div>",
-            unsafe_allow_html=True,
-        )
+        html += f"<div class='small-text'><span class='mini-label'>Evitar quando:</span> {evitar}</div>"
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ─── Interface ────────────────────────────────────────────────────────────────
 
 st.markdown(
     '''
@@ -427,6 +436,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ─── Carga dos dados ──────────────────────────────────────────────────────────
+
 try:
     with st.spinner("Carregando opções..."):
         df = load_data(SHEET_URL)
@@ -444,74 +455,104 @@ if df.empty:
     st.warning("A base não possui esmaltes ativos para exibição.")
     st.stop()
 
-st.markdown(
-    '<div class="filter-card"><div class="section-title">Escolha suas preferências</div>',
-    unsafe_allow_html=True,
-)
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    cor = st.selectbox("Cor", unique_options(df, "Filtro Cor", "Todas"), index=0)
-with c2:
-    estilo = st.selectbox("Estilo", unique_options(df, "Filtro Estilo", "Todos"), index=0)
-with c3:
-    ocasiao = st.selectbox("Ocasião", unique_options(df, "Filtro Ocasião", "Todas"), index=0)
-with c4:
-    sensacao = st.selectbox("Sensação", unique_options(df, "Filtro Sensação", "Todas"), index=0)
-
-buscar = st.button("Ver minhas 3 sugestões")
-st.markdown("</div>", unsafe_allow_html=True)
-
 score_column = "Score Final Recomendação"
-
 if score_column not in df.columns:
     st.error("A base foi carregada, mas a coluna de pontuação não foi encontrada.")
     with st.expander("Colunas recebidas"):
         st.write(df.columns.tolist())
     st.stop()
 
+# ─── Filtros — Sensação primeiro ─────────────────────────────────────────────
+
+# Usamos um contêiner para manter o HTML do card íntegro
+with st.container():
+    st.markdown('<div class="filter-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Escolha suas preferências</div>', unsafe_allow_html=True)
+
+    # SENSAÇÃO como primeiro filtro (coluna maior para destaque)
+    c_sens, c_cor, c_est, c_oc = st.columns(4)
+
+    with c_sens:
+        sensacao = st.selectbox(
+            "✨ Sensação",
+            unique_options(df, "Filtro Sensação", "Todas"),
+            index=0,
+        )
+    with c_cor:
+        cor = st.selectbox(
+            "🎨 Cor",
+            unique_options(df, "Filtro Cor", "Todas"),
+            index=0,
+        )
+    with c_est:
+        estilo = st.selectbox(
+            "💅 Estilo",
+            unique_options(df, "Filtro Estilo", "Todos"),
+            index=0,
+        )
+    with c_oc:
+        ocasiao = st.selectbox(
+            "🌟 Ocasião",
+            unique_options(df, "Filtro Ocasião", "Todas"),
+            index=0,
+        )
+
+    buscar = st.button("Ver minhas 3 sugestões")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ─── Resultados ───────────────────────────────────────────────────────────────
+
 if buscar:
     base = df.copy()
-    base["score_app"] = base.apply(
-        lambda row: calculate_app_score(row, cor, estilo, ocasiao, sensacao),
+
+    # 1. Filtra somente produtos que atendem a TODOS os filtros selecionados
+    mask = base.apply(
+        lambda row: match_filters(row, sensacao, cor, estilo, ocasiao),
         axis=1,
     )
-    resultado = (
-        base.sort_values(
-            by=["score_app", score_column],
-            ascending=[False, False],
-        )
-        .head(3)
-    )
+    base_filtrada = base[mask].copy()
 
-    if resultado.empty:
+    if base_filtrada.empty:
         st.markdown(
             '''
             <div class="empty-card">
                 <div class="section-title">Não encontramos uma combinação ideal.</div>
-                <p class="intro-text">Tente ajustar uma das preferências.</p>
+                <p class="intro-text">
+                    Nenhum esmalte combina com todas as preferências escolhidas ao mesmo tempo.
+                    Tente ajustar ou remover um dos filtros.
+                </p>
             </div>
             ''',
             unsafe_allow_html=True,
         )
     else:
+        # 2. Pontua e ordena os produtos que passaram pelo filtro
+        base_filtrada["score_app"] = base_filtrada.apply(
+            lambda row: calculate_app_score(row, sensacao, cor, estilo, ocasiao),
+            axis=1,
+        )
+        resultado = (
+            base_filtrada
+            .sort_values(by=["score_app", score_column], ascending=[False, False])
+            .head(3)
+        )
+
         st.markdown(
             '<div class="section-title">Suas 3 sugestões LIIVV</div>',
             unsafe_allow_html=True,
         )
         for rank, (_, row) in enumerate(resultado.iterrows(), start=1):
             render_result_card(row, rank)
+
 else:
+    # Estado inicial: mostra destaques gerais
     sugestoes = (
         df.sort_values(by=score_column, ascending=False)
         .head(3)
     )
-
     st.markdown(
         '<div class="section-title">Sugestões em destaque</div>',
         unsafe_allow_html=True,
     )
-
     for rank, (_, row) in enumerate(sugestoes.iterrows(), start=1):
         render_result_card(row, rank)
