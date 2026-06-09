@@ -303,58 +303,56 @@ def unique_options(df: pd.DataFrame, column: str, default_label: str) -> list[st
     return [default_label] + clean
 
 
-# ─── Lógica de pontuação e filtragem ─────────────────────────────────────────
+# ─── Lógica de pontuação por proximidade ─────────────────────────────────────
 
-def match_filters(row, sensacao, cor, estilo, ocasiao) -> bool:
-    """
-    Retorna False se o produto NÃO atende a algum filtro obrigatório selecionado.
-    Um filtro no valor padrão ("Todas"/"Todos") é ignorado.
-    """
-    checks = [
-        (sensacao, "Filtro Sensação"),
-        (cor,      "Filtro Cor"),
-        (estilo,   "Filtro Estilo"),
-        (ocasiao,  "Filtro Ocasião"),
-    ]
-    for choice, col in checks:
-        if choice in {"Todas", "Todos", "Qualquer"}:
-            continue
-        if not contains_choice(safe_get(row, col), choice):
-            return False
-    return True
+DEFAULTS = {"Todas", "Todos", "Qualquer"}
+
+# Pesos por filtro — soma máxima = 100
+FILTER_WEIGHTS = [
+    ("Filtro Sensação", "sensacao", 30),
+    ("Filtro Cor",      "cor",      25),
+    ("Filtro Estilo",   "estilo",   25),
+    ("Filtro Ocasião",  "ocasiao",  20),
+]
 
 
-def calculate_app_score(row, sensacao, cor, estilo, ocasiao) -> float:
+def calculate_app_score(row, sensacao, cor, estilo, ocasiao) -> tuple[float, int]:
     """
-    Calcula pontuação ponderada.
-    Sensação tem o maior peso (30), depois Cor (25), Estilo (25) e Ocasião (20).
-    O Score Final da planilha contribui com 30% extra como desempate.
+    Retorna (score_total, qtd_filtros_atendidos).
+
+    Nunca exclui produtos — sempre pontua por proximidade.
+    Filtros no valor padrão são ignorados (não penalizam nem somam).
+    Cada filtro selecionado contribui com seu peso se o produto o atende.
+    O Score Final da planilha é usado como desempate (até +30 pts).
     """
+    choices = {
+        "sensacao": sensacao,
+        "cor":      cor,
+        "estilo":   estilo,
+        "ocasiao":  ocasiao,
+    }
+
     score = 0.0
-    active = 0  # quantos filtros foram realmente selecionados
+    atendidos = 0
+    ativos = 0
 
-    weights = [
-        (sensacao, "Filtro Sensação", 30),
-        (cor,      "Filtro Cor",      25),
-        (estilo,   "Filtro Estilo",   25),
-        (ocasiao,  "Filtro Ocasião",  20),
-    ]
-
-    for choice, col, w in weights:
-        if choice not in {"Todas", "Todos", "Qualquer"}:
-            active += 1
-            if contains_choice(safe_get(row, col), choice):
-                score += w
+    for col, key, peso in FILTER_WEIGHTS:
+        choice = choices[key]
+        if choice in DEFAULTS:
+            continue
+        ativos += 1
+        if contains_choice(safe_get(row, col), choice):
+            score += peso
+            atendidos += 1
 
     base = float(safe_get(row, "Score Final Recomendação", 0) or 0)
 
-    if active == 0:
-        # nenhum filtro selecionado → usa só o score da planilha
-        return round(base, 2)
+    if ativos == 0:
+        return round(base, 2), 0
 
-    # desempate proporcional pelo score da planilha (max 30 pontos extras)
+    # desempate pelo score base da planilha (normalizado para até 30 pts)
     score += base * 0.30
-    return round(score, 2)
+    return round(score, 2), atendidos
 
 
 # ─── Renderização ─────────────────────────────────────────────────────────────
@@ -370,7 +368,7 @@ def escape_html(value) -> str:
     )
 
 
-def render_result_card(row, rank: int) -> None:
+def render_result_card(row, rank: int, match_badge: str | None = None) -> None:
     produto    = escape_html(safe_get(row, "Produto"))
     fabricante = escape_html(safe_get(row, "Fabricante"))
     titulo     = escape_html(safe_get(row, "Título Recomendação", "Recomendação LIIVV") or "Recomendação LIIVV")
@@ -381,12 +379,20 @@ def render_result_card(row, rank: int) -> None:
     combina    = escape_html(safe_get(row, "Combina com"))
     evitar     = escape_html(safe_get(row, "Evitar quando"))
 
+    badge_html = ""
+    if match_badge:
+        badge_html = (
+            f'<span style="display:inline-block;margin-left:10px;padding:2px 10px;'
+            f'border-radius:999px;background:#EBA6A6;color:#fff;font-size:0.75rem;'
+            f'font-family:Montserrat,sans-serif;font-weight:700;">{match_badge}</span>'
+        )
+
     html = f'''
     <div class="result-card">
         <div style="display:flex; align-items:center;">
             <div class="result-rank">{rank}</div>
             <div>
-                <p class="result-product">{produto}</p>
+                <p class="result-product">{produto} {badge_html}</p>
                 <div class="result-brand">{fabricante}</div>
             </div>
         </div>
@@ -505,44 +511,42 @@ with st.container():
 if buscar:
     base = df.copy()
 
-    # 1. Filtra somente produtos que atendem a TODOS os filtros selecionados
-    mask = base.apply(
-        lambda row: match_filters(row, sensacao, cor, estilo, ocasiao),
+    # Calcula score de proximidade para TODOS os produtos (nunca exclui)
+    scores_atendidos = base.apply(
+        lambda row: calculate_app_score(row, sensacao, cor, estilo, ocasiao),
         axis=1,
     )
-    base_filtrada = base[mask].copy()
+    base["score_app"]  = scores_atendidos.apply(lambda x: x[0])
+    base["atendidos"]  = scores_atendidos.apply(lambda x: x[1])
 
-    if base_filtrada.empty:
-        st.markdown(
-            '''
-            <div class="empty-card">
-                <div class="section-title">Não encontramos uma combinação ideal.</div>
-                <p class="intro-text">
-                    Nenhum esmalte combina com todas as preferências escolhidas ao mesmo tempo.
-                    Tente ajustar ou remover um dos filtros.
-                </p>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
-    else:
-        # 2. Pontua e ordena os produtos que passaram pelo filtro
-        base_filtrada["score_app"] = base_filtrada.apply(
-            lambda row: calculate_app_score(row, sensacao, cor, estilo, ocasiao),
-            axis=1,
-        )
-        resultado = (
-            base_filtrada
-            .sort_values(by=["score_app", score_column], ascending=[False, False])
-            .head(3)
-        )
+    # Conta quantos filtros foram selecionados
+    n_ativos = sum(
+        1 for v in [sensacao, cor, estilo, ocasiao]
+        if v not in DEFAULTS
+    )
 
-        st.markdown(
-            '<div class="section-title">Suas 3 sugestões LIIVV</div>',
-            unsafe_allow_html=True,
-        )
-        for rank, (_, row) in enumerate(resultado.iterrows(), start=1):
-            render_result_card(row, rank)
+    resultado = (
+        base
+        .sort_values(by=["score_app", score_column], ascending=[False, False])
+        .head(3)
+    )
+
+    st.markdown(
+        '<div class="section-title">Suas 3 sugestões LIIVV</div>',
+        unsafe_allow_html=True,
+    )
+
+    for rank, (_, row) in enumerate(resultado.iterrows(), start=1):
+        badge = None
+        if n_ativos > 0:
+            atend = int(row["atendidos"])
+            if atend == n_ativos:
+                badge = "✓ combinação perfeita"
+            elif atend > 0:
+                badge = f"✓ {atend} de {n_ativos} preferências"
+            else:
+                badge = "próximo disponível"
+        render_result_card(row, rank, match_badge=badge)
 
 else:
     # Estado inicial: mostra destaques gerais
